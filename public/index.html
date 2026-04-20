@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Linxicon bridge solver</title>
+  <style>
+    :root {
+      color-scheme: dark light;
+      --bg: #0f1115;
+      --fg: #e8e6e3;
+      --muted: #9a9590;
+      --accent: #6b9fff;
+      --border: #2a2f38;
+      --card: #161a22;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f7f5f2;
+        --fg: #1a1a1a;
+        --muted: #5c5854;
+        --accent: #115cff;
+        --border: #d4cfc7;
+        --card: #fff;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "DM Sans", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+      line-height: 1.45;
+      min-height: 100vh;
+      padding: 1.25rem clamp(1rem, 3vw, 2rem);
+    }
+    h1 { font-size: 1.35rem; font-weight: 650; margin: 0 0 0.35rem; }
+    .sub { color: var(--muted); font-size: 0.9rem; margin-bottom: 1.25rem; max-width: 52rem; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem 1.1rem;
+      max-width: 52rem;
+      margin-bottom: 1rem;
+    }
+    label { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 0.25rem; }
+    input[type="text"] {
+      width: 100%;
+      max-width: 16rem;
+      padding: 0.45rem 0.55rem;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: inherit;
+      font-size: 1rem;
+    }
+    .row { display: flex; flex-wrap: wrap; gap: 0.75rem 1.25rem; align-items: flex-end; margin-bottom: 0.75rem; }
+    button {
+      font: inherit;
+      padding: 0.5rem 1rem;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--accent);
+      color: #fff;
+      cursor: pointer;
+    }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    button.secondary { background: transparent; color: var(--fg); }
+    .progress { font-size: 0.88rem; color: var(--muted); margin-top: 0.5rem; min-height: 1.25rem; }
+    .results h2 { font-size: 1rem; margin: 0 0 0.5rem; }
+    .pill {
+      display: inline-block;
+      padding: 0.15rem 0.45rem;
+      border-radius: 4px;
+      background: var(--border);
+      font-size: 0.8rem;
+      margin-right: 0.35rem;
+    }
+    ul { margin: 0; padding-left: 1.15rem; }
+    li { margin: 0.35rem 0; }
+    .err { color: #f66; }
+    .hint { color: var(--muted); font-size: 0.88rem; margin: 0.5rem 0 0.75rem; max-width: 48rem; }
+    code { font-size: 0.88em; }
+    a { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <h1>Linxicon bridge solver</h1>
+  <p class="sub">
+    Finds a one-word or two-word semantic bridge between two endpoints using the same
+    <code>/api/updateSemantics</code> scoring as <a href="https://linxicon.com" target="_blank" rel="noreferrer">linxicon.com</a>.
+    A link counts when similarity is at least <strong id="threshLabel">41%</strong> (game UI rule). One word in the middle must clear that bar to <em>both</em> endpoints, which is uncommon; the two-hop search is usually where answers appear. After <code>npm run build-graph</code> (long run; <code>npm run build-graph:resume</code> if interrupted), scores live in <code>public/data/</code> for fast lookups. Open this app at <code>http://localhost:8787</code> via <code>npm start</code> so <code>/data/</code> loads. When both endpoints are in that graph, the solver uses only local files (no linxicon.com). Otherwise the server still proxies the API where needed.
+  </p>
+
+  <div class="card">
+    <div class="row">
+      <div>
+        <label for="w1">Start word</label>
+        <input id="w1" type="text" autocomplete="off" placeholder="investment" />
+      </div>
+      <div>
+        <label for="w2">End word</label>
+        <input id="w2" type="text" autocomplete="off" placeholder="easily" />
+      </div>
+      <div>
+        <button type="button" id="solveBtn">Solve</button>
+        <button type="button" id="cancelBtn" class="secondary" disabled>Cancel</button>
+      </div>
+    </div>
+    <div>
+      <label for="extra">Extra candidate words (comma-separated, optional)</label>
+      <input id="extra" type="text" style="max-width: 100%;" placeholder="e.g. market, finance" autocomplete="off" />
+    </div>
+    <p class="progress" id="progress"></p>
+    <p class="pill" id="graphStat" style="margin-top:0.6rem;">Offline graph: checking…</p>
+  </div>
+
+  <div class="card results" id="out" hidden>
+    <h2>Results</h2>
+    <div id="outBody"></div>
+  </div>
+
+  <div class="card">
+    <h2 style="font-size:1rem;margin:0 0 .5rem;">Session similarity cache</h2>
+    <p style="color:var(--muted);font-size:.88rem;margin:0 0 .6rem;">
+      Every API response is recorded here (pairs explored and raw edge list). Download as JSON to grow your own offline cache.
+    </p>
+    <button type="button" class="secondary" id="dlCache" disabled>Download cache JSON</button>
+    <span class="pill" id="cacheCount">0 calls</span>
+  </div>
+
+  <script>
+    const LINK_THRESHOLD = 0.41;
+    document.getElementById("threshLabel").textContent = Math.round(LINK_THRESHOLD * 100) + "%";
+
+    const cache = [];
+
+    /** undefined = not loaded yet, null = no files, object = graph */
+    let OFFLINE = undefined;
+    /** Single in-flight load so Solve does not double-fetch the ~35MB matrix. */
+    let offlineGraphLoadPromise = null;
+
+    function norm(s) {
+      return String(s || "").trim().toLowerCase();
+    }
+
+    function isBlocked(word, bl) {
+      const w = norm(word);
+      if (!w) return true;
+      const exact = Array.isArray(bl && bl.exact) ? bl.exact : [];
+      const substring = Array.isArray(bl && bl.substring) ? bl.substring : [];
+      if (exact.includes(w)) return true;
+      return substring.some((frag) => w.includes(frag));
+    }
+
+    function nodeId(word) {
+      return "node-" + norm(word);
+    }
+
+    function scoresToEndpoints(edges, cand, w1, w2) {
+      const nc = nodeId(cand);
+      const n1 = nodeId(w1);
+      const n2 = nodeId(w2);
+      let s1 = null;
+      let s2 = null;
+      for (const e of edges) {
+        const { from, to, score } = e;
+        if ((from === nc && to === n1) || (from === n1 && to === nc)) s1 = score;
+        if ((from === nc && to === n2) || (from === n2 && to === nc)) s2 = score;
+      }
+      return { s1, s2 };
+    }
+
+    function scoreBetweenNodes(edges, a, b) {
+      const na = nodeId(a);
+      const nb = nodeId(b);
+      for (const e of edges) {
+        const { from, to, score } = e;
+        if ((from === na && to === nb) || (from === nb && to === na)) return score;
+      }
+      return null;
+    }
+
+    async function postSemantics(oldWords, newWord, starters, signal) {
+      const body = JSON.stringify({
+        oldWords: oldWords.map(norm),
+        newWord: norm(newWord),
+        starters: { tl: norm(starters.tl), br: norm(starters.br) },
+      });
+      const res = await fetch("/api/updateSemantics", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+        signal,
+      });
+      const text = await res.text();
+      let edges;
+      try {
+        edges = JSON.parse(text);
+      } catch {
+        throw new Error("updateSemantics: " + res.status + " " + text.slice(0, 200));
+      }
+      if (!Array.isArray(edges)) throw new Error("updateSemantics: expected array");
+      cache.push({ oldWords: [...oldWords], newWord: norm(newWord), edges });
+      document.getElementById("cacheCount").textContent = cache.length + " calls";
+      document.getElementById("dlCache").disabled = false;
+      return edges;
+    }
+
+    async function checkDictionary(word, signal) {
+      const w = encodeURIComponent(norm(word));
+      const res = await fetch("/api/dictionary?word=" + w, { signal });
+      const t = await res.text();
+      if (t === "true") return true;
+      if (t === "false") return false;
+      try {
+        const j = JSON.parse(t);
+        if (typeof j === "boolean") return j;
+      } catch (_) {}
+      throw new Error("dictionary: unexpected " + res.status + " " + t);
+    }
+
+    async function mapPool(items, limit, fn, signal) {
+      const results = new Array(items.length);
+      let i = 0;
+      async function worker() {
+        while (true) {
+          if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+          const j = i++;
+          if (j >= items.length) break;
+          results[j] = await fn(items[j], j);
+        }
+      }
+      await Promise.all(Array.from({ length: limit }, () => worker()));
+      return results;
+    }
+
+    function rankKey(s1, s2) {
+      const a = s1 == null ? -1 : s1;
+      const b = s2 == null ? -1 : s2;
+      const m = Math.min(a, b);
+      return [m, (a + b) / 2];
+    }
+
+    function cmpRank(a, b) {
+      for (let k = 0; k < a.length; k++) {
+        if (b[k] !== a[k]) return b[k] - a[k];
+      }
+      return 0;
+    }
+
+    function scoreOffline(wa, wb) {
+      if (!OFFLINE || typeof OFFLINE !== "object") return null;
+      const i = OFFLINE.idx.get(norm(wa));
+      const j = OFFLINE.idx.get(norm(wb));
+      if (i == null || j == null || i === j) return null;
+      const s = OFFLINE.mat[i * OFFLINE.n + j];
+      return Number.isFinite(s) && s >= 0 ? s : null;
+    }
+
+    async function ensureOfflineGraph() {
+      if (OFFLINE !== undefined) return OFFLINE;
+      const pill = document.getElementById("graphStat");
+      if (location.protocol === "file:") {
+        OFFLINE = null;
+        pill.innerHTML =
+          "Offline graph: open via <strong>http://localhost:8787</strong> after <code>npm start</code> (file:// cannot load <code>/data/</code>).";
+        return null;
+      }
+      if (!offlineGraphLoadPromise) {
+        offlineGraphLoadPromise = (async () => {
+          try {
+            const [mr, br] = await Promise.all([
+              fetch("/data/linxicon-graph-meta.json"),
+              fetch("/data/linxicon-graph-scores.bin"),
+            ]);
+            if (!mr.ok || !br.ok) {
+              OFFLINE = null;
+              pill.textContent =
+                "Offline graph: not installed — run npm run build-graph (then refresh). Serving dictionary + API proxy only.";
+              return null;
+            }
+            const meta = await mr.json();
+            const raw = await br.arrayBuffer();
+            const need = meta.n * meta.n * 4;
+            if (raw.byteLength !== need) {
+              OFFLINE = null;
+              pill.textContent = "Offline graph: corrupt size mismatch — rebuild (npm run build-graph)";
+              return null;
+            }
+            OFFLINE = {
+              n: meta.n,
+              starters: meta.starters || null,
+              idx: new Map(meta.words.map((w, i) => [norm(w), i])),
+              mat: new Float32Array(raw.slice(0)),
+            };
+            const mb = (raw.byteLength / 1e6).toFixed(1);
+            const sc = OFFLINE.starters;
+            const scHint = sc && sc.tl && sc.br ? " (built with corners " + sc.tl + " ↔ " + sc.br + ")" : "";
+            pill.textContent =
+              "Offline graph: " +
+              meta.n +
+              " words (" +
+              mb +
+              " MB) — fast scoring when both endpoints are in the list" +
+              scHint;
+            return OFFLINE;
+          } catch (e) {
+            console.warn(e);
+            OFFLINE = null;
+            const m = e && e.message ? String(e.message) : String(e);
+            pill.textContent =
+              m.includes("Failed to fetch") || m.includes("NetworkError")
+                ? "Offline graph: network error — is the local server running? (npm start)"
+                : "Offline graph: unavailable (" + m.slice(0, 80) + ")";
+            return null;
+          }
+        })();
+      }
+      await offlineGraphLoadPromise;
+      return OFFLINE;
+    }
+
+    window.addEventListener("DOMContentLoaded", () => {
+      ensureOfflineGraph();
+    });
+
+    document.getElementById("dlCache").onclick = () => {
+      const blob = new Blob([JSON.stringify({ meta: { linkThreshold: LINK_THRESHOLD, exportedAt: new Date().toISOString() }, calls: cache }, null, 2)], { type: "application/json" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "linxicon-similarity-cache.json";
+      a.click();
+      URL.revokeObjectURL(a.href);
+    };
+
+    let abortCtl = null;
+
+    document.getElementById("cancelBtn").onclick = () => {
+      if (abortCtl) abortCtl.abort();
+    };
+
+    document.getElementById("solveBtn").onclick = async () => {
+      const w1 = norm(document.getElementById("w1").value);
+      const w2 = norm(document.getElementById("w2").value);
+      const progress = document.getElementById("progress");
+      const out = document.getElementById("out");
+      const outBody = document.getElementById("outBody");
+      out.hidden = true;
+      outBody.innerHTML = "";
+
+      if (w1.length < 3 || w2.length < 3) {
+        progress.innerHTML = '<span class="err">Each word must be at least 3 letters.</span>';
+        return;
+      }
+      if (w1 === w2) {
+        progress.innerHTML = '<span class="err">Pick two different words.</span>';
+        return;
+      }
+
+      abortCtl = new AbortController();
+      const signal = abortCtl.signal;
+      document.getElementById("solveBtn").disabled = true;
+      document.getElementById("cancelBtn").disabled = false;
+      progress.textContent = "Loading word list and graph…";
+
+      try {
+        const [wordsRes, blRes] = await Promise.all([
+          fetch("/data/linxicon-words.json", { signal }),
+          fetch("/data/linxicon-blocklist.json", { signal }),
+          ensureOfflineGraph(),
+        ]);
+        if (!wordsRes.ok) throw new Error("Missing /data/linxicon-words.json — run scripts/build-data.ps1 or npm run extract");
+        const pack = await wordsRes.json();
+        const bl = await blRes.json().catch(() => ({ exact: [], substring: [] }));
+
+        if (isBlocked(w1, bl) || isBlocked(w2, bl)) {
+          progress.innerHTML = '<span class="err">One or both words match the local blocklist.</span>';
+          return;
+        }
+
+        const base = pack.words.filter((w) => w.length >= 3 && w !== w1 && w !== w2 && !isBlocked(w, bl));
+        const extras = document.getElementById("extra").value
+          .split(/[,;\s]+/)
+          .map(norm)
+          .filter((w) => w.length >= 3 && w !== w1 && w !== w2 && !isBlocked(w, bl));
+        const candidates = [...new Set([...extras, ...base])];
+
+        const endpointsInGraph = !!(OFFLINE && typeof OFFLINE === "object" && OFFLINE.idx.has(w1) && OFFLINE.idx.has(w2));
+        let ok1 = false;
+        let ok2 = false;
+        if (endpointsInGraph) {
+          ok1 = ok2 = true;
+          progress.textContent = "Endpoints OK (in offline graph — no Linxicon request).";
+        } else {
+          progress.textContent = "Checking dictionary on Linxicon…";
+          [ok1, ok2] = await Promise.all([checkDictionary(w1, signal), checkDictionary(w2, signal)]);
+        }
+        if (!ok1 || !ok2) {
+          progress.innerHTML =
+            '<span class="err">Dictionary check failed for one or both words (they may be invalid on Linxicon, or not in the offline word list).</span>';
+          return;
+        }
+
+        const starters = { tl: w1, br: w2 };
+        const canOffline = endpointsInGraph;
+
+        let phase1;
+        const total = candidates.length;
+
+        if (canOffline) {
+          const missing = candidates.filter((c) => !OFFLINE.idx.has(c));
+          phase1 = candidates
+            .filter((c) => OFFLINE.idx.has(c))
+            .map((c) => ({ c, s1: scoreOffline(w1, c), s2: scoreOffline(w2, c), edges: null }))
+            .filter((x) => x.s1 != null && x.s2 != null);
+          progress.textContent =
+            "Phase 1: offline (" +
+            phase1.length +
+            "/" +
+            total +
+            " in graph" +
+            (missing.length ? "; skipped " + missing.length + " not in graph" : "") +
+            ")";
+        } else {
+          let done = 0;
+          progress.textContent = "Phase 1: live API (" + total + " requests)…";
+          phase1 = await mapPool(
+            candidates,
+            5,
+            async (c) => {
+              const edges = await postSemantics([w1, w2], c, starters, signal);
+              const { s1, s2 } = scoresToEndpoints(edges, c, w1, w2);
+              done++;
+              if (done % 25 === 0 || done === total) {
+                progress.textContent = "Phase 1: " + done + " / " + total + " (" + c + ")";
+              }
+              return { c, s1, s2, edges };
+            },
+            signal,
+          );
+        }
+
+        const oneHop = phase1
+          .filter((x) => x.s1 != null && x.s2 != null && x.s1 >= LINK_THRESHOLD && x.s2 >= LINK_THRESHOLD)
+          .map((x) => ({ word: x.c, s1: x.s1, s2: x.s2, key: rankKey(x.s1, x.s2) }))
+          .sort((a, b) => cmpRank(a.key, b.key));
+
+        let html = "";
+        html += "<p>Endpoints: <strong>" + w1 + "</strong> → <strong>" + w2 + "</strong></p>";
+
+        if (oneHop.length) {
+          html += "<h3>One word in the middle (best first)</h3><ul>";
+          for (const h of oneHop.slice(0, 15)) {
+            const pct = (x) => (x * 100).toFixed(1) + "%";
+            html += "<li><strong>" + h.word + "</strong> — min " + pct(Math.min(h.s1, h.s2)) + " (" + w1 + ": " + pct(h.s1) + ", " + w2 + ": " + pct(h.s2) + ")</li>";
+          }
+          html += "</ul>";
+        } else {
+          html +=
+            "<p><strong>No single-word bridge</strong> among " +
+            total +
+            " candidates: nothing scored ≥" +
+            Math.round(LINK_THRESHOLD * 100) +
+            "% to <em>both</em> endpoints at once. That is normal for many pairs.</p>";
+          html +=
+            "<p class=\"hint\">The two-hop section below looks for <code>" +
+            w1 +
+            "–a–b–" +
+            w2 +
+            "</code> where each of the three edges is strong enough on its own (same rule as the game).</p>";
+
+          const scored = phase1.filter((x) => x.s1 != null && x.s2 != null);
+          const nearOne = [...scored]
+            .map((x) => ({ c: x.c, s1: x.s1, s2: x.s2, min: Math.min(x.s1, x.s2) }))
+            .sort((a, b) => b.min - a.min || b.s1 + b.s2 - (a.s1 + a.s2))
+            .slice(0, 10);
+          if (nearOne.length) {
+            const pct = (x) => (x * 100).toFixed(1) + "%";
+            html += "<h3>Closest one-word tries (still not a legal single hop)</h3><ul>";
+            for (const n of nearOne) {
+              html +=
+                "<li><strong>" +
+                n.c +
+                "</strong> — min " +
+                pct(n.min) +
+                " (" +
+                w1 +
+                ": " +
+                pct(n.s1) +
+                ", " +
+                w2 +
+                ": " +
+                pct(n.s2) +
+                ")</li>";
+            }
+            html += "</ul>";
+          }
+          const byS1 = [...scored].sort((a, b) => b.s1 - a.s1);
+          const byS2 = [...scored].sort((a, b) => b.s2 - a.s2);
+          const pickA = (arr, pred, lim) => arr.filter(pred).slice(0, lim).map((x) => x.c);
+          let A = pickA(byS1, (x) => x.s1 >= LINK_THRESHOLD, 36);
+          let B = pickA(byS2, (x) => x.s2 >= LINK_THRESHOLD, 36);
+          if (!A.length) A = byS1.slice(0, 28).map((x) => x.c);
+          if (!B.length) B = byS2.slice(0, 28).map((x) => x.c);
+
+          const p1Map = new Map(scored.map((x) => [x.c, x]));
+          progress.textContent = "Phase 2: two-hop search (up to " + A.length * B.length + " pairs)…";
+
+          const twoHop = [];
+          let p2 = 0;
+          const maxPairs = canOffline ? 12000 : 900;
+          outer: for (const a of A) {
+            for (const b of B) {
+              if (a === b) continue;
+              if (++p2 > maxPairs) break outer;
+              if (p2 % 200 === 0) progress.textContent = "Phase 2: " + p2 + " / ~" + Math.min(maxPairs, A.length * B.length);
+              let sab = canOffline && OFFLINE.idx.has(a) && OFFLINE.idx.has(b) ? scoreOffline(a, b) : null;
+              if (sab == null && !canOffline) {
+                const edges = await postSemantics([w1, w2, a], b, starters, signal);
+                sab = scoreBetweenNodes(edges, a, b);
+              }
+              if (sab == null) continue;
+              if (sab == null || sab < LINK_THRESHOLD) continue;
+              const ra = p1Map.get(a);
+              const rb = p1Map.get(b);
+              if (!ra || !rb) continue;
+              if (ra.s1 < LINK_THRESHOLD || rb.s2 < LINK_THRESHOLD) continue;
+              const m = Math.min(ra.s1, sab, rb.s2);
+              if (m < LINK_THRESHOLD) continue;
+              twoHop.push({ a, b, s1: ra.s1, sab, s2: rb.s2, key: [m, (ra.s1 + sab + rb.s2) / 3] });
+            }
+          }
+
+          twoHop.sort((u, v) => cmpRank(u.key, v.key));
+          if (twoHop.length) {
+            html += "<h3>Two words in the middle (best first)</h3><ul>";
+            const pct = (x) => (x * 100).toFixed(1) + "%";
+            for (const t of twoHop.slice(0, 15)) {
+              html +=
+                "<li><strong>" +
+                w1 +
+                " – " +
+                t.a +
+                " – " +
+                t.b +
+                " – " +
+                w2 +
+                "</strong><br/>Scores: " +
+                pct(t.s1) +
+                " / " +
+                pct(t.sab) +
+                " / " +
+                pct(t.s2) +
+                " (min " +
+                pct(Math.min(t.s1, t.sab, t.s2)) +
+                ")</li>";
+            }
+            html += "</ul>";
+          } else {
+            html +=
+              "<p>No two-hop bridge found in the explored subset. Try adding domain-specific words in <em>Extra candidates</em>, or lower the threshold in the source if you accept weaker links.</p>";
+          }
+        }
+
+        outBody.innerHTML = html;
+        out.hidden = false;
+        progress.textContent = canOffline
+          ? cache.length
+            ? "Done. (mostly offline; " + cache.length + " extra API call(s).)"
+            : "Done. (fully offline — no requests to linxicon.com.)"
+          : "Done. (" + cache.length + " API calls logged.)";
+      } catch (e) {
+        if (e.name === "AbortError") progress.textContent = "Cancelled.";
+        else {
+          console.error(e);
+          progress.innerHTML = '<span class="err">' + (e.message || String(e)) + "</span>";
+        }
+      } finally {
+        document.getElementById("solveBtn").disabled = false;
+        document.getElementById("cancelBtn").disabled = true;
+      }
+    };
+  </script>
+</body>
+</html>

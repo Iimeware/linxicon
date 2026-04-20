@@ -1,0 +1,4 @@
+node_modules/
+*.log
+public/data/.linxicon-graph-build.json
+public/data/linxicon-graph-scores.partial.bin
